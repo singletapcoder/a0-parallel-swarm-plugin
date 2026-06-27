@@ -42,12 +42,30 @@ def _extract_content(payload: dict[str, Any]) -> str:
 
 
 def _extract_usage(payload: dict[str, Any]) -> dict[str, Any]:
-    usage = payload.get("usage") or {}
-    return {
+    return normalize_usage(payload.get("usage"), "")
+
+
+def normalize_usage(raw_usage: Any, content: str) -> dict[str, Any]:
+    """Normalize provider usage into exact/unknown evidence.
+
+    OpenRouter/model providers may omit token usage or return null fields. Do
+    not silently treat that as zero; preserve confidence and character counts.
+    """
+    usage = raw_usage if isinstance(raw_usage, dict) else {}
+    normalized = {
         "prompt_tokens": usage.get("prompt_tokens"),
         "completion_tokens": usage.get("completion_tokens"),
         "total_tokens": usage.get("total_tokens"),
+        "raw_usage": raw_usage,
+        "usage_confidence": "exact",
+        "usage_missing_fields": [],
+        "response_character_count": len(content or ""),
     }
+    missing = [key for key in ("prompt_tokens", "completion_tokens", "total_tokens") if normalized.get(key) is None]
+    normalized["usage_missing_fields"] = missing
+    if missing:
+        normalized["usage_confidence"] = "provider_missing"
+    return normalized
 
 
 def _timeout_seconds() -> float:
@@ -86,7 +104,8 @@ def _call_openrouter_sync(model: str, prompt: str, *, api_key: str) -> tuple[str
         raise OpenRouterUnavailable(f"BLOCKED_OPENROUTER_UNAVAILABLE: HTTP {exc.code}: {detail}") from exc
     except Exception as exc:
         raise OpenRouterUnavailable(f"BLOCKED_OPENROUTER_UNAVAILABLE: {exc}") from exc
-    return _extract_content(payload), _extract_usage(payload)
+    content = _extract_content(payload)
+    return content, normalize_usage(payload.get("usage"), content)
 
 
 async def run_openrouter_task(task) -> tuple[str, dict[str, Any]]:
@@ -112,7 +131,15 @@ async def run_openrouter_task(task) -> tuple[str, dict[str, Any]]:
         metadata.update({"status": "completed", "token_usage": usage})
     except OpenRouterUnavailable as exc:
         content = str(exc)
-        usage = {"prompt_tokens": None, "completion_tokens": None, "total_tokens": 0}
+        usage = {
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "total_tokens": None,
+            "raw_usage": None,
+            "usage_confidence": "unavailable",
+            "usage_missing_fields": ["prompt_tokens", "completion_tokens", "total_tokens"],
+            "response_character_count": len(content),
+        }
         metadata.update({"status": "blocked", "error": str(exc), "token_usage": usage})
         write_openrouter_artifacts(task, prompt, content, metadata)
         raise

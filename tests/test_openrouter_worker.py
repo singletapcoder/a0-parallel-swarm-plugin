@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from plugins.parallel_swarm.python.helpers.artifacts import extract_diff_block
-from plugins.parallel_swarm.python.helpers.openrouter_worker import OpenRouterUnavailable, run_openrouter_task
+from plugins.parallel_swarm.python.helpers.artifacts import extract_diff_block, validate_candidate_patch
+from plugins.parallel_swarm.python.helpers.openrouter_worker import OpenRouterUnavailable, normalize_usage, run_openrouter_task
 
 
 def _task(tmp_path, **overrides):
@@ -127,3 +127,46 @@ async def test_orchestrator_openrouter_backend_uses_adapter_not_agent_monologue(
     assert task.result == "openrouter result"
     assert task.tokens_used == 7
     assert calls == {"openrouter": 1, "agent_init": 0}
+
+
+
+def test_validate_candidate_patch_rejects_empty_patch():
+    result = validate_candidate_patch("", ["tests/test_example.py"])
+    assert result["status"] == "invalid"
+    assert "empty_patch" in result["reasons"]
+
+
+def test_validate_candidate_patch_accepts_allowed_complete_diff():
+    diff = """diff --git a/tests/test_example.py b/tests/test_example.py
+--- a/tests/test_example.py
++++ b/tests/test_example.py
+@@ -1,1 +1,2 @@
+ old
++new
+"""
+    result = validate_candidate_patch(diff, ["tests/test_example.py"])
+    assert result["status"] == "valid_basic"
+    assert result["touched_files"] == ["tests/test_example.py"]
+    assert result["allowed_files_violated"] == []
+
+
+def test_validate_candidate_patch_flags_disallowed_file():
+    diff = """diff --git a/src/unsafe.py b/src/unsafe.py
+--- a/src/unsafe.py
++++ b/src/unsafe.py
+@@ -1,1 +1,2 @@
+ old
++new
+"""
+    result = validate_candidate_patch(diff, ["tests/test_example.py"])
+    assert result["status"] == "invalid"
+    assert result["allowed_files_violated"] == ["src/unsafe.py"]
+    assert "allowed_files_violated" in result["reasons"]
+
+
+def test_normalize_usage_marks_missing_provider_fields():
+    usage = normalize_usage({"prompt_tokens": None, "completion_tokens": 5}, "abc")
+    assert usage["usage_confidence"] == "provider_missing"
+    assert usage["response_character_count"] == 3
+    assert "prompt_tokens" in usage["usage_missing_fields"]
+    assert "total_tokens" in usage["usage_missing_fields"]
