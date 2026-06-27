@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from plugins.parallel_swarm.python.helpers.model_registry import resolve_model_for_role
 from plugins.parallel_swarm.python.helpers.model_router import TaskComplexity
 from plugins.parallel_swarm.python.helpers.openrouter_worker import OpenRouterUnavailable, run_openrouter_task
 from plugins.parallel_swarm.python.helpers.swarm import SwarmTask
@@ -49,6 +50,8 @@ def task_from_payload(payload: dict[str, Any], *, output_dir: str = "") -> Swarm
     data["complexity"] = _complexity(payload.get("complexity", data.get("complexity")))
     data.setdefault("backend", "openrouter")
     data.setdefault("fallback_policy", "stop_not_direct_code")
+    resolution = resolve_model_for_role(str(data.get("role", "") or ""), str(data.get("model", "") or ""))
+    data["model"] = resolution.model
     if output_dir:
         data["output_dir"] = output_dir
     return SwarmTask(**data)
