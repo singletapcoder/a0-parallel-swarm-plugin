@@ -76,11 +76,26 @@ def _timeout_seconds() -> float:
         return 120.0
 
 
-def _call_openrouter_sync(model: str, prompt: str, *, api_key: str) -> tuple[str, dict[str, Any]]:
+def build_openrouter_system_message(task: Any | None = None) -> str:
+    """Build the OpenRouter system instruction for normal or strict worker mode."""
+    base = "You are a precise coding worker. Produce candidate patches only; do not claim execution."
+    if bool(getattr(task, "strict_diff", False)):
+        return (
+            base
+            + " STRICT OUTPUT MODE: Return exactly one of: a raw unified diff only; "
+            + "NO_PATCH: <short reason>; or BLOCKED_FOR_SAFETY_BOUNDARY: <short reason>. "
+            + "Do not use markdown fences. Do not include prose, summaries, explanations, or text before/after the diff. "
+            + "Do not invent files, classes, functions, import paths, or placeholder index hashes. "
+            + "If uncertain, return NO_PATCH."
+        )
+    return base
+
+
+def _call_openrouter_sync(model: str, prompt: str, *, api_key: str, system_message: str | None = None) -> tuple[str, dict[str, Any]]:
     body = {
         "model": model,
         "messages": [
-            {"role": "system", "content": "You are a precise coding worker. Produce candidate patches only; do not claim execution."},
+            {"role": "system", "content": system_message or build_openrouter_system_message()},
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.1,
@@ -125,9 +140,11 @@ async def run_openrouter_task(task) -> tuple[str, dict[str, Any]]:
         "fallback_used": False,
         "created_at_utc": _utc_stamp(),
         "status": "started",
+        "strict_diff": bool(getattr(task, "strict_diff", False)),
+        "system_message_mode": "strict_diff" if bool(getattr(task, "strict_diff", False)) else "default",
     }
     try:
-        content, usage = _call_openrouter_sync(task.model, prompt, api_key=_api_key())
+        content, usage = _call_openrouter_sync(task.model, prompt, api_key=_api_key(), system_message=build_openrouter_system_message(task))
         metadata.update({"status": "completed", "token_usage": usage})
     except OpenRouterUnavailable as exc:
         content = str(exc)

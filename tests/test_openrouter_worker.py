@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from plugins.parallel_swarm.python.helpers.artifacts import extract_diff_block, validate_candidate_patch
-from plugins.parallel_swarm.python.helpers.openrouter_worker import OpenRouterUnavailable, normalize_usage, run_openrouter_task
+from plugins.parallel_swarm.python.helpers.openrouter_worker import OpenRouterUnavailable, build_openrouter_system_message, normalize_usage, run_openrouter_task
 
 
 def _task(tmp_path, **overrides):
@@ -61,9 +61,11 @@ async def test_openrouter_task_blocks_without_api_key_and_writes_metadata(tmp_pa
 async def test_openrouter_task_success_writes_artifacts(tmp_path, monkeypatch):
     import plugins.parallel_swarm.python.helpers.openrouter_worker as worker
 
-    def fake_call(model, prompt, *, api_key):
+    def fake_call(model, prompt, *, api_key, system_message=None):
         assert model == "qwen/qwen-2.5-coder-32b-instruct"
         assert "Forbidden actions" in prompt
+        assert system_message
+        assert "Produce candidate patches only" in system_message
         return "# Worker Result\n\n## Candidate Patch\n```diff\n+ok\n```", {"total_tokens": 12}
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-not-real")
@@ -170,3 +172,36 @@ def test_normalize_usage_marks_missing_provider_fields():
     assert usage["response_character_count"] == 3
     assert "prompt_tokens" in usage["usage_missing_fields"]
     assert "total_tokens" in usage["usage_missing_fields"]
+
+
+
+def test_build_openrouter_system_message_strict_diff_mode(tmp_path):
+    task = _task(tmp_path, strict_diff=True)
+    message = build_openrouter_system_message(task)
+    assert "STRICT OUTPUT MODE" in message
+    assert "raw unified diff only" in message
+    assert "NO_PATCH" in message
+    assert "BLOCKED_FOR_SAFETY_BOUNDARY" in message
+    assert "Do not use markdown fences" in message
+
+
+@pytest.mark.asyncio
+async def test_openrouter_task_strict_diff_uses_strict_system_message(tmp_path, monkeypatch):
+    import plugins.parallel_swarm.python.helpers.openrouter_worker as worker
+
+    captured = {}
+
+    def fake_call(model, prompt, *, api_key, system_message=None):
+        captured["system_message"] = system_message
+        return "NO_PATCH: already covered", {"total_tokens": 4}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-not-real")
+    monkeypatch.setattr(worker, "_call_openrouter_sync", fake_call)
+    task = _task(tmp_path, strict_diff=True)
+    result, usage = await run_openrouter_task(task)
+    assert usage["total_tokens"] == 4
+    assert "NO_PATCH" in result
+    assert "STRICT OUTPUT MODE" in captured["system_message"]
+    metadata = json.loads((Path(task.output_dir) / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["strict_diff"] is True
+    assert metadata["system_message_mode"] == "strict_diff"
