@@ -231,6 +231,88 @@ S&P 500 closed at 5,180, up 0.8% on the week...
 **Swarm Summary:** 6/6 tasks completed | Total tokens consumed: 47,832
 ```
 
+
+## OpenRouter Worker Mode
+
+This fork adds an **OpenRouter-backed worker mode** for cost-controlled, auditable
+parallel coding/review tasks. It is designed for workflows where the swarm should
+produce candidate artifacts only, while a human/Jarvis gatekeeper reviews and
+applies changes separately.
+
+### OpenRouter task fields
+
+A `call_swarm` task can now include OpenRouter-specific fields:
+
+```json
+{
+  "id": "M5_003",
+  "description": "Fixture-only accounting edge candidate",
+  "message": "Produce a candidate patch only.",
+  "backend": "openrouter",
+  "model": "deepseek/deepseek-chat",
+  "role": "cheap_coder",
+  "fallback_policy": "stop_not_direct_code",
+  "output_dir": "/absolute/path/to/artifacts/M5_003",
+  "allowed_files": ["tests/test_position_accounting.py"],
+  "forbidden_actions": ["broker_calls", "credential_resolution", "live_trading"],
+  "expected_artifacts": ["metadata.json", "prompt.md", "raw_response.md", "candidate_patch.diff"]
+}
+```
+
+`backend: "openrouter"` routes the task through the OpenRouter worker helper instead
+of the normal Agent Zero subordinate monologue path. The fallback policy
+`stop_not_direct_code` is intentionally fail-closed: if OpenRouter is unavailable,
+the task blocks rather than silently falling back to the primary model.
+
+### Role/model registry
+
+Tasks may specify an exact `model`, or use a known `role` that resolves to a
+pinned model:
+
+| Role | Default model |
+|---|---|
+| `cheap_coder` | `deepseek/deepseek-chat` |
+| `long_context_worker` | `google/gemini-2.5-flash` |
+| `coding_lead` | `anthropic/claude-sonnet-4` |
+| `review_gate` | `google/gemini-2.5-pro` |
+| `architect_arbiter` | `anthropic/claude-opus-4.1` |
+
+Explicit per-task `model` values always win over role resolution. Unknown roles
+without an explicit model remain unresolved so OpenRouter tasks can fail closed
+instead of guessing.
+
+### Artifact contract
+
+Each OpenRouter task writes durable artifacts under `output_dir`:
+
+- `prompt.md` — exact prompt sent to the worker
+- `raw_response.md` — full model response
+- `candidate_patch.diff` — first fenced diff/patch block, if present
+- `metadata.json` — backend/model/fallback/status/token/patch-validation metadata
+
+Patch validation metadata includes empty-patch detection, basic unified-diff shape
+checks, touched-file extraction, and allowed-file violation detection. Repo-specific
+`git apply --check` and tests remain gatekeeper responsibilities.
+
+### One-shot launcher tool
+
+The plugin also provides `run_openrouter_worker`, a one-worker tool wrapper around
+the deterministic launcher. It requires a single JSON task object and an absolute
+`output_dir` so artifacts are durable from the start.
+
+Use this for pilot tasks or controlled single-worker execution. Use `call_swarm`
+for multi-task fan-out after the one-shot path is proven.
+
+### Safety model
+
+OpenRouter workers should generate **candidate patches/reports only**. They should
+not directly apply changes, run live systems, access secrets, deploy, publish,
+clear halts, or claim release/live/deployment readiness. The intended workflow is:
+
+```text
+OpenRouter worker -> candidate artifacts -> Jarvis/human review -> git apply/check/tests -> PR/merge
+```
+
 ## Requirements
 
 - Agent Zero (latest version with plugin support)

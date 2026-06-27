@@ -21,3 +21,18 @@ backpressure_threshold: 0.8
 
 # Enable shared memory between parallel agents (federated learning)
 shared_memory: true
+
+# OpenRouter worker mode defaults (fork extension)
+# These are documentation/default hints. Per-task JSON still controls exact
+# backend/model/role/output_dir/fallback behavior.
+openrouter_timeout_seconds: 120
+openrouter_fallback_policy: "stop_not_direct_code"
+openrouter_default_role: "cheap_coder"
+
+# Role-to-model defaults used by python/helpers/model_registry.py
+# cheap_coder: deepseek/deepseek-chat
+# long_context_worker: google/gemini-2.5-flash
+# coding_lead: anthropic/claude-sonnet-4
+# review_gate: google/gemini-2.5-pro
+# architect_arbiter: anthropic/claude-opus-4.1
+
