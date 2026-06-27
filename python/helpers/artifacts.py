@@ -23,26 +23,81 @@ def safe_task_output_dir(task) -> Path:
     return base
 
 
+def extract_fenced_diff(text: str) -> str:
+    """Return the first fenced diff/patch block, or an empty string."""
+    pattern = r"```(?:diff|patch)\n(.*?)```"
+    match = re.search(pattern, text or "", flags=re.DOTALL | re.IGNORECASE)
+    if match:
+        return match.group(1).strip() + "\n"
+    return ""
+
+
+def extract_raw_diff(text: str) -> str:
+    """Return raw unified diff text only when the response starts with a diff."""
+    raw = (text or "").strip()
+    if raw.startswith("diff --git ") or raw.startswith("--- "):
+        return raw + "\n"
+    return ""
+
+
 def extract_diff_block(text: str, *, strict_diff: bool = False) -> str:
     """Return candidate diff text from a worker response.
 
     Normal mode preserves the original contract: first fenced diff/patch block.
-    Strict mode accepts raw unified diff only, because workers are instructed not
-    to wrap output in markdown. Safety/NO_PATCH sentinel responses produce an
-    empty candidate patch.
+    Strict mode accepts raw unified diff only. More nuanced classification is
+    handled by classify_candidate_response().
+    """
+    if strict_diff:
+        return extract_raw_diff(text)
+    return extract_fenced_diff(text)
+
+
+def classify_candidate_response(text: str, allowed_files: list[str] | None = None) -> dict[str, Any]:
+    """Classify a worker response without mutating any repository.
+
+    This supports a scalable swarm workflow: workers may return raw diffs,
+    fenced diffs, idea-only prose, safety blocks, or unusable output. The
+    classifier preserves useful repairable candidates without weakening the
+    apply/test gate.
     """
     raw = (text or "").strip()
-    if strict_diff:
-        if raw.startswith(("NO_PATCH", "BLOCKED_FOR_SAFETY_BOUNDARY")):
-            return ""
-        if raw.startswith("diff --git ") or raw.startswith("--- "):
-            return raw + "\n"
-        return ""
-    pattern = r"```(?:diff|patch)\n(.*?)```"
-    match = re.search(pattern, text, flags=re.DOTALL | re.IGNORECASE)
-    if match:
-        return match.group(1).strip() + "\n"
-    return ""
+    raw_diff = extract_raw_diff(raw)
+    fenced_diff = extract_fenced_diff(raw)
+    normalized_patch = raw_diff or fenced_diff
+
+    if raw.startswith("BLOCKED_FOR_SAFETY_BOUNDARY"):
+        classification = "blocked_for_safety"
+        recommended_action = "record_and_skip"
+    elif raw.startswith("NO_PATCH"):
+        classification = "no_patch"
+        recommended_action = "record_and_skip"
+    elif raw_diff:
+        classification = "usable_raw_diff"
+        recommended_action = "validate_then_review"
+    elif fenced_diff:
+        classification = "repairable_fenced_diff"
+        recommended_action = "validate_normalized_patch_then_review"
+    elif raw:
+        classification = "idea_only"
+        recommended_action = "manual_review_or_repair"
+    else:
+        classification = "nonsense"
+        recommended_action = "reject"
+
+    validation = validate_candidate_patch(normalized_patch, allowed_files or [])
+    if normalized_patch and validation.get("allowed_files_violated"):
+        classification = "unsafe_or_out_of_scope"
+        recommended_action = "reject"
+
+    return {
+        "classification": classification,
+        "recommended_action": recommended_action,
+        "has_raw_diff": bool(raw_diff),
+        "has_fenced_diff": bool(fenced_diff),
+        "normalized_patch": normalized_patch,
+        "normalized_patch_bytes": len(normalized_patch.encode("utf-8")),
+        "patch_validation": validation,
+    }
 
 
 def _diff_touched_files(diff_text: str) -> list[str]:
@@ -134,25 +189,37 @@ def write_openrouter_artifacts(task, prompt: str, raw_response: str, metadata: d
     prompt_path = out / "prompt.md"
     raw_path = out / "raw_response.md"
     patch_path = out / "candidate_patch.diff"
+    normalized_patch_path = out / "normalized_candidate_patch.diff"
     meta_path = out / "metadata.json"
 
     prompt_path.write_text(prompt, encoding="utf-8")
     raw_path.write_text(raw_response, encoding="utf-8")
     candidate_patch = extract_diff_block(raw_response, strict_diff=bool(getattr(task, "strict_diff", False)))
+    classification = classify_candidate_response(raw_response, getattr(task, "allowed_files", []) or [])
+    normalized_patch = classification["normalized_patch"]
     patch_path.write_text(candidate_patch, encoding="utf-8")
+    normalized_patch_path.write_text(normalized_patch, encoding="utf-8")
 
     metadata = dict(metadata)
-    patch_validation = validate_candidate_patch(candidate_patch, getattr(task, "allowed_files", []) or [])
+    patch_validation = classification["patch_validation"]
+    normalized_patch_validation = validate_candidate_patch(normalized_patch, getattr(task, "allowed_files", []) or [])
     if bool(getattr(task, "validate_git_apply", False)):
         patch_validation["git_apply_check"] = git_apply_check(candidate_patch, getattr(task, "context_repo_path", "") or "")
+        normalized_patch_validation["git_apply_check"] = git_apply_check(normalized_patch, getattr(task, "context_repo_path", "") or "")
+    classification = dict(classification)
+    classification.pop("normalized_patch", None)
+    classification["normalized_patch_path"] = str(normalized_patch_path)
+    classification["normalized_patch_validation"] = normalized_patch_validation
     metadata.update({
         "prompt_path": str(prompt_path),
         "raw_response_path": str(raw_path),
         "candidate_patch_path": str(patch_path),
+        "normalized_candidate_patch_path": str(normalized_patch_path),
         "output_dir": str(out),
         "strict_diff": bool(getattr(task, "strict_diff", False)),
         "include_allowed_file_context": bool(getattr(task, "include_allowed_file_context", False)),
         "context_repo_path": getattr(task, "context_repo_path", "") or "",
+        "candidate_classification": classification,
         "patch_validation": patch_validation,
     })
     with meta_path.open("w", encoding="utf-8") as fh:
@@ -163,5 +230,6 @@ def write_openrouter_artifacts(task, prompt: str, raw_response: str, metadata: d
         "prompt_path": str(prompt_path),
         "raw_response_path": str(raw_path),
         "candidate_patch_path": str(patch_path),
+        "normalized_candidate_patch_path": str(normalized_patch_path),
         "metadata_path": str(meta_path),
     }
