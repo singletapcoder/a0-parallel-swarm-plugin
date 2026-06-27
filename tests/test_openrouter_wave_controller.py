@@ -117,3 +117,38 @@ def test_write_monitor_report_is_report_only_and_recommends_next_action(tmp_path
     assert Path(report["monitor_json_report_path"]).exists()
     markdown = Path(report["monitor_markdown_report_path"]).read_text(encoding="utf-8")
     assert "run_lane_lead_aggregation" in markdown
+
+
+
+def test_update_worker_from_result_can_persist_manifest_for_later_reload(tmp_path):
+    manifest = create_wave_manifest(
+        run_id="wave_persist",
+        output_dir=tmp_path,
+        max_workers_total=1,
+        max_concurrency=1,
+        worker_payloads=[{"id": "w1"}],
+    )
+    result_path = tmp_path / "w1" / "pilot_result.json"
+    result_path.parent.mkdir()
+    result_path.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "task_id": "w1",
+                "model": "model-a",
+                "output_dir": str(tmp_path / "w1" / "tasks" / "w1"),
+                "auditable_worker_result": True,
+                "usage": {"total_tokens": 3, "raw_usage": {"cost": 0.001}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    update_worker_from_result(
+        manifest,
+        task_id="w1",
+        result_path=result_path,
+        manifest_path=tmp_path / "wave_manifest.json",
+    )
+    reloaded = load_manifest(tmp_path / "wave_manifest.json")
+    assert reloaded["workers"][0]["status"] == "completed"
+    assert compute_next_state(reloaded) == "ready_for_lane_lead"

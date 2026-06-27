@@ -134,8 +134,18 @@ def register_scheduler_task(manifest: dict[str, Any], *, uuid: str, name: str, s
     return record
 
 
-def update_worker_from_result(manifest: dict[str, Any], *, task_id: str, result_path: str | Path) -> dict[str, Any]:
-    """Update one worker record from a pilot_result.json-style artifact."""
+def update_worker_from_result(
+    manifest: dict[str, Any],
+    *,
+    task_id: str,
+    result_path: str | Path,
+    manifest_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Update one worker record from a pilot_result.json-style artifact.
+
+    If manifest_path is provided, persist the updated manifest immediately so
+    later controller stages can safely reload terminal worker state.
+    """
     result = _read_json(result_path)
     workers = list(manifest.get("workers") or [])
     worker = next((item for item in workers if item.get("task_id") == task_id), None)
@@ -156,6 +166,8 @@ def update_worker_from_result(manifest: dict[str, Any], *, task_id: str, result_
         }
     )
     manifest["workers"] = workers
+    if manifest_path is not None:
+        save_manifest(manifest, manifest_path)
     return worker
 
 
