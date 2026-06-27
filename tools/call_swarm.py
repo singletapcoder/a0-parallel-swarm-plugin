@@ -53,6 +53,15 @@ class SwarmDelegation(Tool):
                 priority=int(t.get("priority", 0)),
                 dependencies=t.get("depends_on", []) or [],
                 token_budget=int(t.get("token_budget", 0)),
+                backend=str(t.get("backend", "agent_zero") or "agent_zero"),
+                model=str(t.get("model", "") or ""),
+                role=str(t.get("role", "") or ""),
+                lane=str(t.get("lane", "") or ""),
+                fallback_policy=str(t.get("fallback_policy", "stop_not_direct_code") or "stop_not_direct_code"),
+                output_dir=str(t.get("output_dir", "") or ""),
+                allowed_files=t.get("allowed_files", []) or [],
+                forbidden_actions=t.get("forbidden_actions", []) or [],
+                expected_artifacts=t.get("expected_artifacts", []) or [],
                 _auto_classified=not explicit_complexity,
             )
             swarm_tasks.append(task)
