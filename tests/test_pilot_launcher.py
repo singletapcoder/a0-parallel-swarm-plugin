@@ -100,3 +100,57 @@ async def test_run_one_openrouter_payload_records_blocked_adapter_error(tmp_path
     )
     assert record["status"] == "blocked"
     assert "BLOCKED_OPENROUTER_UNAVAILABLE" in record["error"]
+
+
+
+def test_task_from_payload_preserves_context_and_strict_diff_fields(tmp_path):
+    task = task_from_payload(
+        {
+            "id": "M4_001",
+            "description": "desc",
+            "message": "msg",
+            "backend": "openrouter",
+            "model": "deepseek/deepseek-chat",
+            "context_repo_path": str(tmp_path),
+            "include_allowed_file_context": True,
+            "strict_diff": True,
+            "validate_git_apply": True,
+        },
+        output_dir=str(tmp_path / "task"),
+    )
+    assert task.context_repo_path == str(tmp_path)
+    assert task.include_allowed_file_context is True
+    assert task.strict_diff is True
+    assert task.validate_git_apply is True
+
+
+@pytest.mark.asyncio
+async def test_run_one_openrouter_payload_records_patch_validation(tmp_path, monkeypatch):
+    import plugins.parallel_swarm.python.helpers.pilot_launcher as launcher
+
+    async def fake_run_openrouter_task(task):
+        Path(task.output_dir).mkdir(parents=True, exist_ok=True)
+        Path(task.output_dir, "metadata.json").write_text(
+            json.dumps({"patch_validation": {"status": "valid_basic", "touched_files": ["tests/test_example.py"]}}),
+            encoding="utf-8",
+        )
+        return "worker result", {"total_tokens": 3, "usage_confidence": "exact"}
+
+    monkeypatch.setattr(launcher, "run_openrouter_task", fake_run_openrouter_task)
+    record = await run_one_openrouter_payload(
+        {
+            "id": "strict",
+            "description": "desc",
+            "message": "msg",
+            "backend": "openrouter",
+            "model": "deepseek/deepseek-chat",
+            "strict_diff": True,
+            "validate_git_apply": True,
+        },
+        run_out=tmp_path / "run",
+    )
+    assert record["patch_validation"]["status"] == "valid_basic"
+    saved = json.loads((tmp_path / "run" / "pilot_result.json").read_text())
+    assert saved["strict_diff"] is True
+    assert saved["validate_git_apply"] is True
+    assert saved["patch_validation"]["touched_files"] == ["tests/test_example.py"]

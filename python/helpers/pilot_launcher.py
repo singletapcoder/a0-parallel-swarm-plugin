@@ -78,6 +78,10 @@ async def run_one_openrouter_payload(payload: dict[str, Any], *, run_out: str | 
             "model": task.model,
             "fallback_policy": task.fallback_policy,
             "output_dir": task.output_dir,
+            "context_repo_path": task.context_repo_path,
+            "include_allowed_file_context": task.include_allowed_file_context,
+            "strict_diff": task.strict_diff,
+            "validate_git_apply": task.validate_git_apply,
         }
     )
     write_result(result_path, record)
@@ -92,12 +96,20 @@ async def run_one_openrouter_payload(payload: dict[str, Any], *, run_out: str | 
 
     try:
         result, usage = await run_openrouter_task(task)
+        metadata_path = Path(task.output_dir) / "metadata.json"
+        patch_validation = None
+        if metadata_path.exists():
+            try:
+                patch_validation = json.loads(metadata_path.read_text(encoding="utf-8")).get("patch_validation")
+            except json.JSONDecodeError:
+                patch_validation = {"status": "metadata_json_decode_failed"}
         record.update(
             {
                 "status": "completed",
                 "auditable_worker_result": True,
                 "usage": usage,
                 "result_preview": result[:1200],
+                "patch_validation": patch_validation,
             }
         )
     except OpenRouterUnavailable as exc:

@@ -255,7 +255,11 @@ A `call_swarm` task can now include OpenRouter-specific fields:
   "output_dir": "/absolute/path/to/artifacts/M5_003",
   "allowed_files": ["tests/test_position_accounting.py"],
   "forbidden_actions": ["broker_calls", "credential_resolution", "live_trading"],
-  "expected_artifacts": ["metadata.json", "prompt.md", "raw_response.md", "candidate_patch.diff"]
+  "expected_artifacts": ["metadata.json", "prompt.md", "raw_response.md", "candidate_patch.diff"],
+  "context_repo_path": "/absolute/path/to/TradingV4",
+  "include_allowed_file_context": true,
+  "strict_diff": true,
+  "validate_git_apply": true
 }
 ```
 
@@ -291,8 +295,23 @@ Each OpenRouter task writes durable artifacts under `output_dir`:
 - `metadata.json` — backend/model/fallback/status/token/patch-validation metadata
 
 Patch validation metadata includes empty-patch detection, basic unified-diff shape
-checks, touched-file extraction, and allowed-file violation detection. Repo-specific
-`git apply --check` and tests remain gatekeeper responsibilities.
+checks, touched-file extraction, and allowed-file violation detection.
+
+For higher-quality patch candidates, tasks can opt into a stricter mode:
+
+- `context_repo_path` points at a local checkout used only for reading allowed-file
+  context and optional non-mutating validation.
+- `include_allowed_file_context: true` embeds the current contents of each
+  `allowed_files` entry into the worker prompt. Paths are resolved safely under
+  `context_repo_path`; path escapes are blocked.
+- `strict_diff: true` requires the worker to return a raw unified diff, `NO_PATCH`,
+  or `BLOCKED_FOR_SAFETY_BOUNDARY` with no markdown wrapper or extra prose.
+- `validate_git_apply: true` runs `git apply --check` against `context_repo_path`
+  and records the result in `metadata.json`. It does not apply the patch or mutate
+  the checkout.
+
+Even with strict mode, tests and human/Jarvis review remain required before any
+candidate is applied.
 
 ### One-shot launcher tool
 

@@ -47,6 +47,10 @@ class SwarmTask:
     allowed_files: list[str] = field(default_factory=list)
     forbidden_actions: list[str] = field(default_factory=list)
     expected_artifacts: list[str] = field(default_factory=list)
+    context_repo_path: str = ""
+    include_allowed_file_context: bool = False
+    strict_diff: bool = False
+    validate_git_apply: bool = False
     agent_number: int | None = None
     created_at: datetime = field(default_factory=datetime.now)
     completed_at: datetime | None = None
