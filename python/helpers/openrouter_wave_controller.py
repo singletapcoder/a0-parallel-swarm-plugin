@@ -50,6 +50,31 @@ def _write_json(path: str | Path, payload: dict[str, Any]) -> None:
     p.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
+def _parse_scheduler_timestamp(value: Any) -> datetime | None:
+    if not value:
+        return None
+    text = str(value)
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _scheduler_timeout_minutes(task_type: str, default_timeout_minutes: int) -> int:
+    # Keep the plugin monitor deliberately simple/report-only. The dedicated
+    # scheduler watchdog may implement richer per-cron policies; the swarm
+    # controller only needs to surface overdue registered tasks before they
+    # silently stall a wave.
+    if task_type in {"planned", "adhoc", ""}:
+        return default_timeout_minutes
+    return default_timeout_minutes
+
+
 def create_wave_manifest(
     *,
     run_id: str,
@@ -254,16 +279,122 @@ def refresh_manifest_state(manifest: dict[str, Any], *, min_terminal_fraction: f
     return manifest
 
 
-def write_monitor_report(manifest: dict[str, Any], *, output_dir: str | Path) -> dict[str, Any]:
+def summarize_registered_scheduler_tasks(
+    manifest: dict[str, Any],
+    *,
+    tasks_path: str | Path = "/a0/usr/scheduler/tasks.json",
+    now: datetime | None = None,
+    default_timeout_minutes: int = 30,
+) -> dict[str, Any]:
+    """Return read-only status for scheduler tasks registered in the wave manifest.
+
+    This monitor helper intentionally does not reset, run, update, or delete
+    Agent Zero scheduler tasks. It only reports stale/overdue `running` tasks so
+    Jarvis can recover them deterministically from artifacts instead of waiting
+    for manual nudges.
+    """
+
+    registered = list(manifest.get("scheduler_tasks") or [])
+    summary: dict[str, Any] = {
+        "registered_count": len(registered),
+        "found_count": 0,
+        "missing_count": 0,
+        "running_count": 0,
+        "overdue_count": 0,
+        "report_only": True,
+        "mutates_scheduler": False,
+        "default_timeout_minutes": default_timeout_minutes,
+        "tasks": [],
+    }
+    if not registered:
+        return summary
+
+    scheduler_payload = _read_json(tasks_path)
+    raw_tasks = scheduler_payload.get("tasks", [])
+    if not isinstance(raw_tasks, list):
+        raw_tasks = []
+    by_uuid = {str(task.get("uuid") or ""): task for task in raw_tasks if isinstance(task, dict)}
+    now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+
+    for item in registered:
+        uuid = str(item.get("uuid") or "")
+        scheduler_task = by_uuid.get(uuid)
+        record: dict[str, Any] = {
+            "uuid": uuid,
+            "name": str(item.get("name") or ""),
+            "stage": str(item.get("stage") or ""),
+            "prompt_path": str(item.get("prompt_path") or ""),
+            "found": scheduler_task is not None,
+            "state": None,
+            "updated_at": None,
+            "last_run": None,
+            "next_run": None,
+            "age_minutes": None,
+            "timeout_minutes": default_timeout_minutes,
+            "overdue_running": False,
+            "recommended_action": "scheduler_task_missing",
+        }
+        if scheduler_task is None:
+            summary["missing_count"] += 1
+            summary["tasks"].append(record)
+            continue
+
+        summary["found_count"] += 1
+        state = str(scheduler_task.get("state") or "")
+        task_type = str(scheduler_task.get("type") or "")
+        timeout = _scheduler_timeout_minutes(task_type, default_timeout_minutes)
+        timestamp = _parse_scheduler_timestamp(scheduler_task.get("updated_at")) or _parse_scheduler_timestamp(scheduler_task.get("last_run")) or _parse_scheduler_timestamp(scheduler_task.get("created_at"))
+        age_minutes = None
+        if timestamp is not None:
+            age_minutes = max(0, int((now_utc - timestamp).total_seconds() // 60))
+        overdue = bool(state == "running" and age_minutes is not None and age_minutes >= timeout)
+        if state == "running":
+            summary["running_count"] += 1
+        if overdue:
+            summary["overdue_count"] += 1
+        record.update(
+            {
+                "name": str(scheduler_task.get("name") or record["name"]),
+                "state": state,
+                "updated_at": scheduler_task.get("updated_at"),
+                "last_run": scheduler_task.get("last_run"),
+                "next_run": scheduler_task.get("next_run"),
+                "age_minutes": age_minutes,
+                "timeout_minutes": timeout,
+                "overdue_running": overdue,
+                "recommended_action": "recover_or_reset_overdue_scheduler_task" if overdue else "no_action_required",
+            }
+        )
+        summary["tasks"].append(record)
+    return summary
+
+
+def write_monitor_report(
+    manifest: dict[str, Any],
+    *,
+    output_dir: str | Path,
+    tasks_path: str | Path = "/a0/usr/scheduler/tasks.json",
+    now: datetime | None = None,
+    scheduler_timeout_minutes: int = 30,
+) -> dict[str, Any]:
     """Write deterministic controller monitor JSON/Markdown reports."""
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     manifest = refresh_manifest_state(dict(manifest))
+    manifest["scheduler_task_summary"] = summarize_registered_scheduler_tasks(
+        manifest,
+        tasks_path=tasks_path,
+        now=now,
+        default_timeout_minutes=scheduler_timeout_minutes,
+    )
+    if manifest["scheduler_task_summary"].get("overdue_count", 0):
+        manifest.setdefault("monitor_alerts", []).append("overdue_registered_scheduler_tasks")
     json_path = out / "wave_controller_monitor_report.json"
     md_path = out / "wave_controller_monitor_report.md"
     _write_json(json_path, manifest)
     counts = manifest.get("worker_summary", {}).get("counts", {})
     guard = manifest.get("budget_guard", {})
+    scheduler_summary = manifest.get("scheduler_task_summary", {})
     lines = [
         "# OpenRouter Wave Controller Monitor Report",
         "",
@@ -278,12 +409,31 @@ def write_monitor_report(manifest: dict[str, Any], *, output_dir: str | Path) ->
         f"- Tokens used: `{guard.get('tokens_used', 0)}`",
         f"- Cost USD: `{guard.get('cost_usd', 0.0)}`",
         f"- Trading V4 mutation performed: `{manifest.get('trading_v4_mutation_performed', False)}`",
+        f"- Registered scheduler tasks: `{scheduler_summary.get('registered_count', 0)}`",
+        f"- Scheduler tasks running: `{scheduler_summary.get('running_count', 0)}`",
+        f"- Scheduler tasks overdue: `{scheduler_summary.get('overdue_count', 0)}`",
         "",
-        "## Recommended Next Action",
-        "",
-        _recommended_next_action(manifest),
+        "## Overdue Scheduler Tasks",
         "",
     ]
+    overdue_tasks = [task for task in scheduler_summary.get("tasks", []) if task.get("overdue_running")]
+    if overdue_tasks:
+        for task in overdue_tasks:
+            lines.append(
+                f"- `{task.get('uuid')}` — {task.get('name')} — age "
+                f"`{task.get('age_minutes')}` min, timeout `{task.get('timeout_minutes')}` min"
+            )
+    else:
+        lines.append("None")
+    lines.extend(
+        [
+            "",
+            "## Recommended Next Action",
+            "",
+            _recommended_next_action(manifest),
+            "",
+        ]
+    )
     md_path.write_text("\n".join(lines), encoding="utf-8")
     manifest["monitor_json_report_path"] = str(json_path)
     manifest["monitor_markdown_report_path"] = str(md_path)
