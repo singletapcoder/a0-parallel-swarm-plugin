@@ -4,7 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from plugins.parallel_swarm.python.helpers.artifacts import extract_diff_block, git_apply_check, repair_candidate_diff, validate_candidate_patch, write_openrouter_artifacts
+from plugins.parallel_swarm.python.helpers.artifacts import extract_diff_block, git_apply_check, recompute_hunk_counts, repair_candidate_diff, validate_candidate_patch, write_openrouter_artifacts
 from plugins.parallel_swarm.python.helpers.model_router import TaskComplexity
 from plugins.parallel_swarm.python.helpers.swarm import SwarmTask
 from plugins.parallel_swarm.python.helpers.trading_v4_policy import build_trading_v4_worker_prompt
@@ -221,3 +221,71 @@ def test_write_artifacts_repairs_stray_marker_diff_and_git_applies(tmp_path):
     assert classification["repaired_patch_applied_repairs"]
     assert classification["repaired_patch_validation"]["git_apply_check"]["status"] == "ok"
     assert Path(paths["repaired_candidate_patch_path"]).read_text(encoding="utf-8").startswith("diff --git ")
+
+
+def test_recompute_hunk_counts_corrects_inaccurate_header_counts():
+    # Header claims 7,7 but body has 5 context + 1 del + 1 add = 6 old / 6 new.
+    diff = (
+        "diff --git a/d.md b/d.md\n"
+        "--- a/d.md\n"
+        "+++ b/d.md\n"
+        "@@ -4,7 +4,7 @@\n"
+        " \n"
+        " para line stays\n"
+        " \n"
+        "-old sentence.\n"
+        "+old sentence and more.\n"
+        " \n"
+        " ## next\n"
+    )
+    repaired, changed = recompute_hunk_counts(diff)
+    assert changed is True
+    assert "@@ -4,6 +4,6 @@" in repaired
+
+
+def test_recompute_hunk_counts_is_noop_for_accurate_header():
+    diff = (
+        "diff --git a/a.txt b/a.txt\n"
+        "--- a/a.txt\n"
+        "+++ b/a.txt\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+    repaired, changed = recompute_hunk_counts(diff)
+    assert changed is False
+    assert repaired.strip() == diff.strip()
+
+
+def test_repair_recomputes_counts_and_makes_patch_git_applyable(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE)
+    (repo / "docs").mkdir()
+    target = repo / "docs" / "d.md"
+    target.write_text("top\n\nparagraph one stays here.\n\nold sentence.\n\n## next\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, stdout=subprocess.PIPE)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "init"], cwd=repo, check=True, stdout=subprocess.PIPE)
+
+    # Worker emits a structurally clean diff but with WRONG hunk counts (claims 7,7).
+    candidate = (
+        "diff --git a/docs/d.md b/docs/d.md\n"
+        "--- a/docs/d.md\n"
+        "+++ b/docs/d.md\n"
+        "@@ -3,7 +3,7 @@\n"
+        " paragraph one stays here.\n"
+        " \n"
+        "-old sentence.\n"
+        "+old sentence and more.\n"
+        " \n"
+        " ## next\n"
+    )
+    # Raw candidate should fail git apply (count mismatch).
+    assert git_apply_check(candidate, str(repo))["status"] == "failed"
+
+    task = _task(tmp_path, context_repo_path=str(repo), allowed_files=["docs/d.md"])
+    paths = write_openrouter_artifacts(task, "prompt", candidate, {"status": "completed"})
+    metadata = json.loads(Path(paths["metadata_path"]).read_text(encoding="utf-8"))
+    classification = metadata["candidate_classification"]
+    assert "recomputed_hunk_counts" in classification["repaired_patch_applied_repairs"]
+    assert classification["repaired_patch_validation"]["git_apply_check"]["status"] == "ok"
