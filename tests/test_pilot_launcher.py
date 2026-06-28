@@ -113,6 +113,10 @@ def test_task_from_payload_preserves_context_and_strict_diff_fields(tmp_path):
             "model": "deepseek/deepseek-chat",
             "context_repo_path": str(tmp_path),
             "include_allowed_file_context": True,
+            "allowed_file_globs": ["tests/test_*.py"],
+            "forbidden_file_globs": ["src/trading_v4/api/security.py"],
+            "read_only_context_files": ["src/trading_v4/api/runtime.py"],
+            "read_only_context_globs": ["docs/*.md"],
             "strict_diff": True,
             "validate_git_apply": True,
         },
@@ -120,6 +124,10 @@ def test_task_from_payload_preserves_context_and_strict_diff_fields(tmp_path):
     )
     assert task.context_repo_path == str(tmp_path)
     assert task.include_allowed_file_context is True
+    assert task.allowed_file_globs == ["tests/test_*.py"]
+    assert task.forbidden_file_globs == ["src/trading_v4/api/security.py"]
+    assert task.read_only_context_files == ["src/trading_v4/api/runtime.py"]
+    assert task.read_only_context_globs == ["docs/*.md"]
     assert task.strict_diff is True
     assert task.validate_git_apply is True
 

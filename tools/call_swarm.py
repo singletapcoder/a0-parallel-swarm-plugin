@@ -60,8 +60,18 @@ class SwarmDelegation(Tool):
                 fallback_policy=str(t.get("fallback_policy", "stop_not_direct_code") or "stop_not_direct_code"),
                 output_dir=str(t.get("output_dir", "") or ""),
                 allowed_files=t.get("allowed_files", []) or [],
+                allowed_file_globs=t.get("allowed_file_globs", []) or [],
+                forbidden_file_globs=t.get("forbidden_file_globs", []) or [],
+                read_only_context_files=t.get("read_only_context_files", []) or [],
+                read_only_context_globs=t.get("read_only_context_globs", []) or [],
                 forbidden_actions=t.get("forbidden_actions", []) or [],
                 expected_artifacts=t.get("expected_artifacts", []) or [],
+                context_repo_path=str(t.get("context_repo_path", "") or ""),
+                include_allowed_file_context=bool(t.get("include_allowed_file_context", False)),
+                strict_diff=bool(t.get("strict_diff", False)),
+                validate_git_apply=bool(t.get("validate_git_apply", False)),
+                context_file_max_bytes=int(t.get("context_file_max_bytes", 20000) or 20000),
+                context_total_max_bytes=int(t.get("context_total_max_bytes", 100000) or 100000),
                 _auto_classified=not explicit_complexity,
             )
             swarm_tasks.append(task)
