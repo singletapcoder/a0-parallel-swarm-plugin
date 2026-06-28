@@ -4,7 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from plugins.parallel_swarm.python.helpers.artifacts import extract_diff_block, git_apply_check, validate_candidate_patch, write_openrouter_artifacts
+from plugins.parallel_swarm.python.helpers.artifacts import extract_diff_block, git_apply_check, repair_candidate_diff, validate_candidate_patch, write_openrouter_artifacts
 from plugins.parallel_swarm.python.helpers.model_router import TaskComplexity
 from plugins.parallel_swarm.python.helpers.swarm import SwarmTask
 from plugins.parallel_swarm.python.helpers.trading_v4_policy import build_trading_v4_worker_prompt
@@ -171,3 +171,53 @@ def test_context_glob_expansion_skips_cache_and_binary_files(tmp_path):
     assert "--- BEGIN ALLOWED MUTATION FILE: src/pkg/module.py" in prompt
     assert "module.pyc" not in prompt
     assert "CONTEXT_FILE_NOT_UTF8" not in prompt
+
+
+def test_repair_candidate_diff_fixes_stray_marker_before_diff_git_header():
+    malformed = "--- diff --git a/tests/test_example.py b/tests/test_example.py\nindex 111..222 100644\n--- a/tests/test_example.py\n+++ b/tests/test_example.py\n@@ -1 +1,2 @@\n def test_existing():\n+    assert True\n"
+    result = repair_candidate_diff(malformed)
+    assert result["repaired"] is True
+    assert result["repaired_text"].startswith("diff --git a/tests/test_example.py b/tests/test_example.py\n")
+    assert "stripped_stray_marker_before_diff_git_header" in result["repairs_applied"]
+
+
+def test_repair_candidate_diff_strips_leading_prose():
+    malformed = "Here is the patch you asked for:\n\ndiff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n"
+    result = repair_candidate_diff(malformed)
+    assert result["repaired"] is True
+    assert result["repaired_text"].startswith("diff --git a/a.txt b/a.txt\n")
+    assert "stripped_leading_non_diff_lines" in result["repairs_applied"]
+
+
+def test_repair_candidate_diff_is_noop_for_clean_diff():
+    clean = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n"
+    result = repair_candidate_diff(clean)
+    assert result["repaired"] is False
+    assert result["repaired_text"].strip() == clean.strip()
+
+
+def test_repair_candidate_diff_reports_no_diff_header():
+    result = repair_candidate_diff("NO_PATCH: nothing safe")
+    assert result["repaired"] is False
+    assert result["reason"] == "no_diff_header_found"
+
+
+def test_write_artifacts_repairs_stray_marker_diff_and_git_applies(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE)
+    (repo / "tests").mkdir()
+    target = repo / "tests" / "test_example.py"
+    target.write_text("def test_existing():\n    assert True\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, stdout=subprocess.PIPE)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "init"], cwd=repo, check=True, stdout=subprocess.PIPE)
+
+    good = "diff --git a/tests/test_example.py b/tests/test_example.py\n--- a/tests/test_example.py\n+++ b/tests/test_example.py\n@@ -1,2 +1,3 @@\n def test_existing():\n     assert True\n+    assert 1 == 1\n"
+    malformed = "--- " + good
+    task = _task(tmp_path, context_repo_path=str(repo), allowed_files=["tests/test_example.py"])
+    paths = write_openrouter_artifacts(task, "prompt", malformed, {"status": "completed"})
+    metadata = json.loads(Path(paths["metadata_path"]).read_text(encoding="utf-8"))
+    classification = metadata["candidate_classification"]
+    assert classification["repaired_patch_applied_repairs"]
+    assert classification["repaired_patch_validation"]["git_apply_check"]["status"] == "ok"
+    assert Path(paths["repaired_candidate_patch_path"]).read_text(encoding="utf-8").startswith("diff --git ")

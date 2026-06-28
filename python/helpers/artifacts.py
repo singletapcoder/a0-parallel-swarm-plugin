@@ -216,12 +216,75 @@ def validate_candidate_patch(
     }
 
 
+def repair_candidate_diff(text: str) -> dict[str, Any]:
+    """Attempt a conservative, non-semantic repair of a malformed unified diff.
+
+    This fixes only common structural malformations observed from LLM workers
+    without altering hunk bodies or recomputing line counts:
+
+    - strips leading prose/blank lines before the first diff header;
+    - repairs a ``diff --git`` header that was prefixed with a stray ``--- ``
+      or ``+++ `` marker (for example ``--- diff --git a/x b/x``);
+    - normalizes CRLF/CR line endings to LF;
+    - ensures a single trailing newline.
+
+    It never applies the patch and never recomputes hunk ranges; semantic
+    correctness still depends on git apply validation downstream.
+    """
+    raw = text or ""
+    normalized = raw.replace("\r\n", "\n").replace("\r", "\n")
+    repairs: list[str] = []
+    if normalized != raw:
+        repairs.append("normalized_line_endings")
+
+    lines = normalized.split("\n")
+
+    # Repair a diff --git header glued behind a stray file-marker prefix.
+    fixed_lines: list[str] = []
+    for line in lines:
+        stripped = line
+        for prefix in ("--- diff --git ", "+++ diff --git "):
+            if stripped.startswith(prefix):
+                stripped = "diff --git " + stripped[len(prefix):]
+                repairs.append("stripped_stray_marker_before_diff_git_header")
+                break
+        fixed_lines.append(stripped)
+    lines = fixed_lines
+
+    # Drop leading lines before the first recognizable diff header.
+    header_index = None
+    for index, line in enumerate(lines):
+        if line.startswith("diff --git ") or line.startswith("--- "):
+            header_index = index
+            break
+    if header_index is None:
+        return {
+            "repaired": False,
+            "repaired_text": "",
+            "repairs_applied": repairs,
+            "reason": "no_diff_header_found",
+        }
+    if header_index > 0:
+        repairs.append("stripped_leading_non_diff_lines")
+    repaired_body = "\n".join(lines[header_index:]).strip("\n")
+    repaired_text = repaired_body + "\n" if repaired_body else ""
+
+    changed = repaired_text.strip() != (raw or "").strip()
+    return {
+        "repaired": changed and bool(repaired_text.strip()),
+        "repaired_text": repaired_text,
+        "repairs_applied": sorted(set(repairs)),
+        "reason": "" if repaired_text.strip() else "empty_after_repair",
+    }
+
+
 def write_openrouter_artifacts(task, prompt: str, raw_response: str, metadata: dict[str, Any]) -> dict[str, str]:
     out = safe_task_output_dir(task)
     prompt_path = out / "prompt.md"
     raw_path = out / "raw_response.md"
     patch_path = out / "candidate_patch.diff"
     normalized_patch_path = out / "normalized_candidate_patch.diff"
+    repaired_patch_path = out / "repaired_candidate_patch.diff"
     meta_path = out / "metadata.json"
 
     prompt_path.write_text(prompt, encoding="utf-8")
@@ -237,6 +300,10 @@ def write_openrouter_artifacts(task, prompt: str, raw_response: str, metadata: d
     patch_path.write_text(candidate_patch, encoding="utf-8")
     normalized_patch_path.write_text(normalized_patch, encoding="utf-8")
 
+    repair = repair_candidate_diff(candidate_patch or normalized_patch or raw_response)
+    repaired_patch = repair["repaired_text"] if repair["repaired"] else ""
+    repaired_patch_path.write_text(repaired_patch, encoding="utf-8")
+
     metadata = dict(metadata)
     patch_validation = classification["patch_validation"]
     normalized_patch_validation = validate_candidate_patch(
@@ -245,13 +312,24 @@ def write_openrouter_artifacts(task, prompt: str, raw_response: str, metadata: d
         getattr(task, "allowed_file_globs", []) or [],
         getattr(task, "forbidden_file_globs", []) or [],
     )
+    repaired_patch_validation = validate_candidate_patch(
+        repaired_patch,
+        getattr(task, "allowed_files", []) or [],
+        getattr(task, "allowed_file_globs", []) or [],
+        getattr(task, "forbidden_file_globs", []) or [],
+    )
     if bool(getattr(task, "validate_git_apply", False)):
         patch_validation["git_apply_check"] = git_apply_check(candidate_patch, getattr(task, "context_repo_path", "") or "")
         normalized_patch_validation["git_apply_check"] = git_apply_check(normalized_patch, getattr(task, "context_repo_path", "") or "")
+        if repaired_patch.strip():
+            repaired_patch_validation["git_apply_check"] = git_apply_check(repaired_patch, getattr(task, "context_repo_path", "") or "")
     classification = dict(classification)
     classification.pop("normalized_patch", None)
     classification["normalized_patch_path"] = str(normalized_patch_path)
     classification["normalized_patch_validation"] = normalized_patch_validation
+    classification["repaired_patch_path"] = str(repaired_patch_path)
+    classification["repaired_patch_applied_repairs"] = repair["repairs_applied"]
+    classification["repaired_patch_validation"] = repaired_patch_validation
     try:
         from plugins.parallel_swarm.python.helpers.trading_v4_policy import build_context_manifest
 
@@ -269,6 +347,7 @@ def write_openrouter_artifacts(task, prompt: str, raw_response: str, metadata: d
         "raw_response_path": str(raw_path),
         "candidate_patch_path": str(patch_path),
         "normalized_candidate_patch_path": str(normalized_patch_path),
+        "repaired_candidate_patch_path": str(repaired_patch_path),
         "output_dir": str(out),
         "strict_diff": bool(getattr(task, "strict_diff", False)),
         "include_allowed_file_context": bool(getattr(task, "include_allowed_file_context", False)),
@@ -290,5 +369,6 @@ def write_openrouter_artifacts(task, prompt: str, raw_response: str, metadata: d
         "raw_response_path": str(raw_path),
         "candidate_patch_path": str(patch_path),
         "normalized_candidate_patch_path": str(normalized_patch_path),
+        "repaired_candidate_patch_path": str(repaired_patch_path),
         "metadata_path": str(meta_path),
     }
