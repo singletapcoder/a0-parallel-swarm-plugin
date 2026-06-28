@@ -45,10 +45,16 @@ class SwarmTask:
     fallback_policy: str = "stop_not_direct_code"
     output_dir: str = ""
     allowed_files: list[str] = field(default_factory=list)
+    allowed_file_globs: list[str] = field(default_factory=list)
+    forbidden_file_globs: list[str] = field(default_factory=list)
+    read_only_context_files: list[str] = field(default_factory=list)
+    read_only_context_globs: list[str] = field(default_factory=list)
     forbidden_actions: list[str] = field(default_factory=list)
     expected_artifacts: list[str] = field(default_factory=list)
     context_repo_path: str = ""
     include_allowed_file_context: bool = False
+    context_file_max_bytes: int = 20000
+    context_total_max_bytes: int = 100000
     strict_diff: bool = False
     validate_git_apply: bool = False
     agent_number: int | None = None

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from plugins.parallel_swarm.python.helpers.artifacts import extract_diff_block, validate_candidate_patch
+from plugins.parallel_swarm.python.helpers.artifacts import classify_candidate_response, extract_diff_block, validate_candidate_patch
 from plugins.parallel_swarm.python.helpers.openrouter_worker import OpenRouterUnavailable, build_openrouter_system_message, normalize_usage, run_openrouter_task
 
 
@@ -205,3 +205,10 @@ async def test_openrouter_task_strict_diff_uses_strict_system_message(tmp_path, 
     metadata = json.loads((Path(task.output_dir) / "metadata.json").read_text(encoding="utf-8"))
     assert metadata["strict_diff"] is True
     assert metadata["system_message_mode"] == "strict_diff"
+
+
+def test_classify_candidate_response_rejects_forbidden_glob():
+    diff = "diff --git a/src/unsafe.py b/src/unsafe.py\n--- a/src/unsafe.py\n+++ b/src/unsafe.py\n@@ -1 +1,2 @@\n x = 1\n+y = 2\n"
+    result = classify_candidate_response(diff, [], ["src/*.py"], ["src/unsafe.py"])
+    assert result["classification"] == "unsafe_or_out_of_scope"
+    assert result["patch_validation"]["forbidden_file_globs_violated"] == ["src/unsafe.py"]

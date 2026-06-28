@@ -25,6 +25,14 @@ async def test_call_swarm_parses_openrouter_fields():
             "fallback_policy": "stop_not_direct_code",
             "output_dir": "/tmp/swarm/M5_001",
             "allowed_files": ["tests/test_position_accounting.py"],
+            "allowed_file_globs": ["tests/test_position_*.py"],
+            "forbidden_file_globs": ["src/trading_v4/api/security.py"],
+            "read_only_context_files": ["src/trading_v4/positions.py"],
+            "read_only_context_globs": ["docs/*.md"],
+            "context_repo_path": "/tmp/repo",
+            "include_allowed_file_context": True,
+            "strict_diff": True,
+            "validate_git_apply": True,
             "forbidden_actions": ["broker_calls"],
             "expected_artifacts": ["metadata.json"],
         }
@@ -48,5 +56,13 @@ async def test_call_swarm_parses_openrouter_fields():
     assert task.role == "cheap_coder"
     assert task.lane == "M5"
     assert task.allowed_files == ["tests/test_position_accounting.py"]
+    assert task.allowed_file_globs == ["tests/test_position_*.py"]
+    assert task.forbidden_file_globs == ["src/trading_v4/api/security.py"]
+    assert task.read_only_context_files == ["src/trading_v4/positions.py"]
+    assert task.read_only_context_globs == ["docs/*.md"]
+    assert task.context_repo_path == "/tmp/repo"
+    assert task.include_allowed_file_context is True
+    assert task.strict_diff is True
+    assert task.validate_git_apply is True
     assert task.forbidden_actions == ["broker_calls"]
     assert task.expected_artifacts == ["metadata.json"]

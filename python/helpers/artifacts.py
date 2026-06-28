@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import re
 import subprocess
@@ -52,7 +53,12 @@ def extract_diff_block(text: str, *, strict_diff: bool = False) -> str:
     return extract_fenced_diff(text)
 
 
-def classify_candidate_response(text: str, allowed_files: list[str] | None = None) -> dict[str, Any]:
+def classify_candidate_response(
+    text: str,
+    allowed_files: list[str] | None = None,
+    allowed_file_globs: list[str] | None = None,
+    forbidden_file_globs: list[str] | None = None,
+) -> dict[str, Any]:
     """Classify a worker response without mutating any repository.
 
     This supports a scalable swarm workflow: workers may return raw diffs,
@@ -84,8 +90,8 @@ def classify_candidate_response(text: str, allowed_files: list[str] | None = Non
         classification = "nonsense"
         recommended_action = "reject"
 
-    validation = validate_candidate_patch(normalized_patch, allowed_files or [])
-    if normalized_patch and validation.get("allowed_files_violated"):
+    validation = validate_candidate_patch(normalized_patch, allowed_files or [], allowed_file_globs or [], forbidden_file_globs or [])
+    if normalized_patch and (validation.get("allowed_files_violated") or validation.get("forbidden_file_globs_violated")):
         classification = "unsafe_or_out_of_scope"
         recommended_action = "reject"
 
@@ -147,21 +153,42 @@ def git_apply_check(diff_text: str, repo_path: str) -> dict[str, Any]:
     }
 
 
-def validate_candidate_patch(diff_text: str, allowed_files: list[str] | None = None) -> dict[str, Any]:
-    """Validate basic candidate patch shape and allowed-file scope.
+def _matches_any_glob(path: str, patterns: list[str]) -> bool:
+    return any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
+
+
+def validate_candidate_patch(
+    diff_text: str,
+    allowed_files: list[str] | None = None,
+    allowed_file_globs: list[str] | None = None,
+    forbidden_file_globs: list[str] | None = None,
+) -> dict[str, Any]:
+    """Validate basic candidate patch shape and allowed/forbidden file scope.
 
     This intentionally avoids applying patches. Repo-specific git apply checks
     remain a gatekeeper responsibility unless a future plugin tool is given an
     explicit repo path and sandbox policy.
     """
     allowed = set(allowed_files or [])
+    allowed_globs = list(allowed_file_globs or [])
+    forbidden_globs = list(forbidden_file_globs or [])
     touched = _diff_touched_files(diff_text)
-    violations = [path for path in touched if allowed and path not in allowed]
+    has_allowed_scope = bool(allowed or allowed_globs)
+    violations = [
+        path
+        for path in touched
+        if has_allowed_scope and path not in allowed and not _matches_any_glob(path, allowed_globs)
+    ]
+    forbidden_violations = [path for path in touched if _matches_any_glob(path, forbidden_globs)]
     has_diff_header = "diff --git " in diff_text
     has_file_header = "--- " in diff_text and "+++ " in diff_text
     has_hunk = "@@" in diff_text
     non_empty = bool(diff_text.strip())
-    status = "valid_basic" if non_empty and (has_diff_header or has_file_header) and has_hunk and not violations else "invalid"
+    status = (
+        "valid_basic"
+        if non_empty and (has_diff_header or has_file_header) and has_hunk and not violations and not forbidden_violations
+        else "invalid"
+    )
     reasons: list[str] = []
     if not non_empty:
         reasons.append("empty_patch")
@@ -171,6 +198,8 @@ def validate_candidate_patch(diff_text: str, allowed_files: list[str] | None = N
         reasons.append("missing_hunk_header")
     if violations:
         reasons.append("allowed_files_violated")
+    if forbidden_violations:
+        reasons.append("forbidden_file_globs_violated")
     return {
         "status": status,
         "non_empty": non_empty,
@@ -179,7 +208,10 @@ def validate_candidate_patch(diff_text: str, allowed_files: list[str] | None = N
         "has_hunk_header": has_hunk,
         "touched_files": touched,
         "allowed_files": sorted(allowed),
+        "allowed_file_globs": allowed_globs,
+        "forbidden_file_globs": forbidden_globs,
         "allowed_files_violated": violations,
+        "forbidden_file_globs_violated": forbidden_violations,
         "reasons": reasons,
     }
 
@@ -195,14 +227,24 @@ def write_openrouter_artifacts(task, prompt: str, raw_response: str, metadata: d
     prompt_path.write_text(prompt, encoding="utf-8")
     raw_path.write_text(raw_response, encoding="utf-8")
     candidate_patch = extract_diff_block(raw_response, strict_diff=bool(getattr(task, "strict_diff", False)))
-    classification = classify_candidate_response(raw_response, getattr(task, "allowed_files", []) or [])
+    classification = classify_candidate_response(
+        raw_response,
+        getattr(task, "allowed_files", []) or [],
+        getattr(task, "allowed_file_globs", []) or [],
+        getattr(task, "forbidden_file_globs", []) or [],
+    )
     normalized_patch = classification["normalized_patch"]
     patch_path.write_text(candidate_patch, encoding="utf-8")
     normalized_patch_path.write_text(normalized_patch, encoding="utf-8")
 
     metadata = dict(metadata)
     patch_validation = classification["patch_validation"]
-    normalized_patch_validation = validate_candidate_patch(normalized_patch, getattr(task, "allowed_files", []) or [])
+    normalized_patch_validation = validate_candidate_patch(
+        normalized_patch,
+        getattr(task, "allowed_files", []) or [],
+        getattr(task, "allowed_file_globs", []) or [],
+        getattr(task, "forbidden_file_globs", []) or [],
+    )
     if bool(getattr(task, "validate_git_apply", False)):
         patch_validation["git_apply_check"] = git_apply_check(candidate_patch, getattr(task, "context_repo_path", "") or "")
         normalized_patch_validation["git_apply_check"] = git_apply_check(normalized_patch, getattr(task, "context_repo_path", "") or "")
@@ -210,6 +252,18 @@ def write_openrouter_artifacts(task, prompt: str, raw_response: str, metadata: d
     classification.pop("normalized_patch", None)
     classification["normalized_patch_path"] = str(normalized_patch_path)
     classification["normalized_patch_validation"] = normalized_patch_validation
+    try:
+        from plugins.parallel_swarm.python.helpers.trading_v4_policy import build_context_manifest
+
+        context_manifest = build_context_manifest(task)
+        context_manifest = dict(context_manifest)
+        context_manifest["files"] = [
+            {key: value for key, value in item.items() if key != "content"}
+            for item in context_manifest.get("files", [])
+        ]
+    except Exception as exc:  # pragma: no cover - defensive metadata path
+        context_manifest = {"status": "context_manifest_unavailable", "error": f"{type(exc).__name__}: {exc}"}
+
     metadata.update({
         "prompt_path": str(prompt_path),
         "raw_response_path": str(raw_path),
@@ -219,6 +273,11 @@ def write_openrouter_artifacts(task, prompt: str, raw_response: str, metadata: d
         "strict_diff": bool(getattr(task, "strict_diff", False)),
         "include_allowed_file_context": bool(getattr(task, "include_allowed_file_context", False)),
         "context_repo_path": getattr(task, "context_repo_path", "") or "",
+        "allowed_file_globs": getattr(task, "allowed_file_globs", []) or [],
+        "forbidden_file_globs": getattr(task, "forbidden_file_globs", []) or [],
+        "read_only_context_files": getattr(task, "read_only_context_files", []) or [],
+        "read_only_context_globs": getattr(task, "read_only_context_globs", []) or [],
+        "context_manifest": context_manifest,
         "candidate_classification": classification,
         "patch_validation": patch_validation,
     })
