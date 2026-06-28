@@ -35,4 +35,3 @@ openrouter_default_role: "cheap_coder"
 # coding_lead: anthropic/claude-sonnet-4
 # review_gate: google/gemini-2.5-pro
 # architect_arbiter: anthropic/claude-opus-4.1
-
