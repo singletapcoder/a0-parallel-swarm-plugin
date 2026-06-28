@@ -85,8 +85,12 @@ def build_openrouter_system_message(task: Any | None = None) -> str:
             + " STRICT OUTPUT MODE: Return exactly one of: a raw unified diff only; "
             + "NO_PATCH: <short reason>; or BLOCKED_FOR_SAFETY_BOUNDARY: <short reason>. "
             + "Do not use markdown fences. Do not include prose, summaries, explanations, or text before/after the diff. "
+            + "The first line must start with 'diff --git ' and never with '--- diff --git'. "
+            + "Do not glue a '--- ' or '+++ ' marker in front of the 'diff --git' header line. "
+            + "Hunk @@ header counts must be accurate; every context line starts with a single space, "
+            + "removed lines with '-', and added lines with '+'. "
             + "Do not invent files, classes, functions, import paths, or placeholder index hashes. "
-            + "If uncertain, return NO_PATCH."
+            + "If you cannot produce an exactly applyable diff, return NO_PATCH instead of an approximate diff."
         )
     return base
 

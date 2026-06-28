@@ -257,8 +257,25 @@ Strict rules:
 - Do not invent files, classes, functions, import paths, or placeholder index hashes.
 - Only touch files listed in Allowed files.
 - Treat Read-only context files as non-mutable evidence, not patch targets.
-- Use repo-relative paths in `diff --git a/... b/...` headers.
 - A partial/truncated diff is worse than `NO_PATCH`.
+
+### Exact diff format
+
+The first line MUST start with `diff --git ` (never `--- diff --git`). Do not glue a `--- ` or `+++ ` marker in front of the `diff --git` line. Use repo-relative paths.
+
+The diff MUST follow this exact structure:
+
+diff --git a/<path> b/<path>
+--- a/<path>
++++ b/<path>
+@@ -<old_start>,<old_count> +<new_start>,<new_count> @@
+<unchanged context line prefixed with a single space>
+-<removed line>
++<added line>
+
+Hunk header counts MUST be accurate: `<old_count>` is the number of context+removed lines in the hunk, and `<new_count>` is the number of context+added lines. If you cannot produce an exactly applyable diff with correct counts and matching context, return `NO_PATCH` instead of an approximate diff.
+
+Every context line must begin with a single space, every removed line with `-`, and every added line with `+`. Do not emit blank lines without a leading space inside a hunk.
 """
     else:
         output_contract = """## Required output contract
