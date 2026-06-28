@@ -38,6 +38,19 @@ class SwarmTask:
     error: str | None = None
     token_budget: int = 0
     tokens_used: int = 0
+    backend: str = "agent_zero"
+    model: str = ""
+    role: str = ""
+    lane: str = ""
+    fallback_policy: str = "stop_not_direct_code"
+    output_dir: str = ""
+    allowed_files: list[str] = field(default_factory=list)
+    forbidden_actions: list[str] = field(default_factory=list)
+    expected_artifacts: list[str] = field(default_factory=list)
+    context_repo_path: str = ""
+    include_allowed_file_context: bool = False
+    strict_diff: bool = False
+    validate_git_apply: bool = False
     agent_number: int | None = None
     created_at: datetime = field(default_factory=datetime.now)
     completed_at: datetime | None = None
@@ -159,6 +172,27 @@ class SwarmOrchestrator:
         await self.concurrency.acquire()
 
         try:
+            if task.backend.lower() == "openrouter":
+                from plugins.parallel_swarm.python.helpers.openrouter_worker import run_openrouter_task
+
+                result, usage = await run_openrouter_task(task)
+                task.status = TaskStatus.COMPLETED
+                task.result = result
+                task.completed_at = datetime.now()
+                task.tokens_used = int(usage.get("total_tokens") or 0) if usage else 0
+                await self.token_pool.consume(task.id, task.tokens_used)
+                self.concurrency.reset_throttle()
+                await self.parent_agent.call_extensions(
+                    "swarm_task_complete",
+                    task=task,
+                    result=result,
+                )
+                PrintStyle(font_color="#4CAF50", padding=True).print(
+                    f"Swarm OpenRouter: Completed '{task.description}' "
+                    f"with {task.model or 'unspecified-model'} ({task.tokens_used} tokens)"
+                )
+                return result
+
             # Initialize config with appropriate model for complexity
             config = initialize_agent()
             task_config = model_router.select_model_config(task.complexity, config)
