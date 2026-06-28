@@ -216,6 +216,80 @@ def validate_candidate_patch(
     }
 
 
+_HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
+
+
+def recompute_hunk_counts(diff_text: str) -> tuple[str, bool]:
+    """Recompute unified-diff hunk header line counts from the actual hunk body.
+
+    LLM workers frequently emit a structurally correct diff whose ``@@`` header
+    declares inaccurate line counts, which makes ``git apply`` reject the patch
+    as corrupt. This corrects only the declared counts to match the emitted
+    body. It never edits hunk bodies, never invents content, and preserves the
+    original start offsets and any trailing section heading.
+    """
+    raw = diff_text or ""
+    trailing_newline = raw.endswith("\n")
+    lines = raw.split("\n")
+    if trailing_newline and lines and lines[-1] == "":
+        lines = lines[:-1]
+    out: list[str] = []
+    changed = False
+    index = 0
+    total = len(lines)
+    while index < total:
+        line = lines[index]
+        match = _HUNK_HEADER_RE.match(line)
+        if not match:
+            out.append(line)
+            index += 1
+            continue
+        old_start = match.group(1)
+        new_start = match.group(3)
+        section = match.group(5) or ""
+        body: list[str] = []
+        cursor = index + 1
+        while cursor < total:
+            candidate = lines[cursor]
+            if (
+                candidate.startswith("@@ ")
+                or candidate.startswith("diff --git ")
+                or candidate.startswith("--- ")
+                or candidate.startswith("+++ ")
+            ):
+                break
+            body.append(candidate)
+            cursor += 1
+        old_count = 0
+        new_count = 0
+        for body_line in body:
+            if body_line.startswith("\\"):
+                continue  # "\ No newline at end of file" marker
+            if body_line.startswith("+"):
+                new_count += 1
+            elif body_line.startswith("-"):
+                old_count += 1
+            else:
+                old_count += 1
+                new_count += 1
+        declared_old = int(match.group(2)) if match.group(2) is not None else 1
+        declared_new = int(match.group(4)) if match.group(4) is not None else 1
+        if old_count == declared_old and new_count == declared_new:
+            # Counts already accurate; preserve the original header verbatim
+            # (including the single-line omitted-count form like "@@ -1 +1 @@").
+            out.append(line)
+        else:
+            recomputed = f"@@ -{old_start},{old_count} +{new_start},{new_count} @@{section}"
+            changed = True
+            out.append(recomputed)
+        out.extend(body)
+        index = cursor
+    repaired = "\n".join(out)
+    if trailing_newline:
+        repaired += "\n"
+    return repaired, changed
+
+
 def repair_candidate_diff(text: str) -> dict[str, Any]:
     """Attempt a conservative, non-semantic repair of a malformed unified diff.
 
@@ -268,6 +342,12 @@ def repair_candidate_diff(text: str) -> dict[str, Any]:
         repairs.append("stripped_leading_non_diff_lines")
     repaired_body = "\n".join(lines[header_index:]).strip("\n")
     repaired_text = repaired_body + "\n" if repaired_body else ""
+
+    if repaired_text.strip():
+        recomputed_text, counts_changed = recompute_hunk_counts(repaired_text)
+        if counts_changed:
+            repaired_text = recomputed_text
+            repairs.append("recomputed_hunk_counts")
 
     changed = repaired_text.strip() != (raw or "").strip()
     return {
