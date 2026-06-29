@@ -120,10 +120,57 @@ def _normalized_patch_path(candidate_dir: Path, metadata: dict[str, Any]) -> str
     return str(default) if default.exists() else ""
 
 
-def _recommendation(classification: str, allowed_file_violations: list[str]) -> str:
+def _git_apply_status_from(validation: Any) -> str:
+    """Return the recorded git_apply_check status from one validation block."""
+    if not isinstance(validation, dict):
+        return ""
+    check = validation.get("git_apply_check")
+    if not isinstance(check, dict):
+        return ""
+    return str(check.get("status") or "")
+
+
+def _apply_outcome(metadata: dict[str, Any]) -> dict[str, str]:
+    """Derive an apply-awareness outcome from recorded git_apply_check statuses.
+
+    Behavior-preserving when no git_apply_check is recorded (returns 'unknown'),
+    so structurally-classified candidates without apply evidence are unchanged.
+    Only an explicitly recorded apply failure downgrades a usable diff.
+    """
+    candidate = metadata.get("candidate_classification") if isinstance(metadata.get("candidate_classification"), dict) else {}
+    candidate_status = (
+        _git_apply_status_from(candidate.get("patch_validation"))
+        or _git_apply_status_from(candidate.get("normalized_patch_validation"))
+        or _git_apply_status_from(metadata.get("patch_validation"))
+        or _git_apply_status_from(metadata.get("normalized_patch_validation"))
+    )
+    repaired_status = (
+        _git_apply_status_from(candidate.get("repaired_patch_validation"))
+        or _git_apply_status_from(metadata.get("repaired_patch_validation"))
+    )
+    if candidate_status == "ok":
+        outcome = "applies_clean"
+    elif repaired_status == "ok":
+        outcome = "applies_after_repair"
+    elif candidate_status in {"failed", "error"} or repaired_status in {"failed", "error"}:
+        outcome = "apply_failed"
+    else:
+        outcome = "unknown"
+    return {
+        "apply_outcome": outcome,
+        "candidate_git_apply_status": candidate_status or "unknown",
+        "repaired_git_apply_status": repaired_status or "unknown",
+    }
+
+
+def _recommendation(classification: str, allowed_file_violations: list[str], apply_outcome: str = "unknown") -> str:
     if classification in REJECT_CLASSIFICATIONS or allowed_file_violations:
         return "reject_or_skip"
     if classification == "usable_raw_diff":
+        if apply_outcome == "apply_failed":
+            return "apply_failed_needs_fix_or_repair"
+        if apply_outcome == "applies_after_repair":
+            return "validate_repaired_then_jarvis_review"
         return "validate_then_jarvis_review"
     if classification == "repairable_fenced_diff":
         return "preserve_for_validation_or_repair"
@@ -134,10 +181,16 @@ def _recommendation(classification: str, allowed_file_violations: list[str]) -> 
     return "reject"
 
 
-def _usefulness_score(classification: str, allowed_file_violations: list[str], touched_files: list[str], raw_response: str) -> int:
+def _usefulness_score(classification: str, allowed_file_violations: list[str], touched_files: list[str], raw_response: str, apply_outcome: str = "unknown") -> int:
     if classification in REJECT_CLASSIFICATIONS or allowed_file_violations:
         return 0
     if classification == "usable_raw_diff":
+        if apply_outcome == "apply_failed":
+            # Structurally well-formed but does not apply: rank below genuine
+            # usable/repairable so it cannot masquerade as cleanly usable.
+            return 25
+        if apply_outcome == "applies_after_repair":
+            return 90 + min(10, len(touched_files))
         return 100 + min(10, len(touched_files))
     if classification == "repairable_fenced_diff":
         return 80 + min(10, len(touched_files))
@@ -166,6 +219,8 @@ def collect_candidate(candidate_dir: str | Path) -> dict[str, Any]:
     touched_files = _touched_files(metadata)
     violations = _allowed_file_violations(metadata)
     normalized_path = _normalized_patch_path(path, metadata)
+    apply_info = _apply_outcome(metadata)
+    apply_outcome = apply_info["apply_outcome"]
     return {
         "task_id": task_id,
         "title": title,
@@ -175,8 +230,11 @@ def collect_candidate(candidate_dir: str | Path) -> dict[str, Any]:
         "normalized_patch_path": normalized_path,
         "classification": classification,
         "classification_rank": _classification_rank(classification),
-        "recommended_action": _recommendation(classification, violations),
-        "usefulness_score": _usefulness_score(classification, violations, touched_files, raw_response),
+        "git_apply_outcome": apply_outcome,
+        "candidate_git_apply_status": apply_info["candidate_git_apply_status"],
+        "repaired_git_apply_status": apply_info["repaired_git_apply_status"],
+        "recommended_action": _recommendation(classification, violations, apply_outcome),
+        "usefulness_score": _usefulness_score(classification, violations, touched_files, raw_response, apply_outcome),
         "touched_files": touched_files,
         "allowed_file_violations": violations,
         "raw_response_bytes": len(raw_response.encode("utf-8")),
