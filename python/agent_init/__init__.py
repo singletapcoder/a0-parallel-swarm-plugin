@@ -34,6 +34,9 @@ def agent_init(agent, config):
     if not hasattr(config, "swarm_model_complex"):
         config.swarm_model_complex = ""
 
+    if not hasattr(config, "swarm_model_moderate"):
+        config.swarm_model_moderate = ""
+
     if not hasattr(config, "swarm_backpressure_threshold"):
         config.swarm_backpressure_threshold = 0.8
 

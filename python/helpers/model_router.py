@@ -103,10 +103,14 @@ def select_model_config(
         new_config = copy.copy(config)
         new_config.chat_model = config.swarm_model_simple
         return new_config
+    elif complexity == TaskComplexity.MODERATE and config.swarm_model_moderate:
+        new_config = copy.copy(config)
+        new_config.chat_model = config.swarm_model_moderate
+        return new_config
     elif complexity == TaskComplexity.COMPLEX and config.swarm_model_complex:
         new_config = copy.copy(config)
         new_config.chat_model = config.swarm_model_complex
         return new_config
 
-    # MODERATE or no override — use default chat model
+    # No override — use default chat model
     return config

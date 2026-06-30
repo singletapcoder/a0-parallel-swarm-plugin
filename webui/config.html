@@ -120,6 +120,16 @@
           <span class="ps-hint">Use a cheaper/faster model for simple tasks (e.g., gpt-4o-mini).</span>
         </div>
 
+        <!-- Moderate Model Override -->
+        <div class="ps-field">
+          <label class="ps-label">Moderate Tasks Model</label>
+          <input type="text"
+                 x-model="config.moderate_model"
+                 placeholder="(use agent default)"
+                 class="ps-input" />
+          <span class="ps-hint">Model for moderate complexity tasks (e.g., code generation, multi-step analysis).</span>
+        </div>
+
         <!-- Complex Model Override -->
         <div class="ps-field">
           <label class="ps-label">Complex Tasks Model</label>

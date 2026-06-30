@@ -114,6 +114,7 @@ Configure model overrides in the settings UI to use specific models per tier.
 | `auto_classify` | true | Route tasks to models by complexity |
 | `shared_memory` | true | Enable `swarm_share` between agents |
 | `simple_model` | (default) | Model override for simple tasks |
+| `moderate_model` | (default) | Model override for moderate tasks |
 | `complex_model` | (default) | Model override for complex tasks |
 | `backpressure_threshold` | 0.8 | Throttle when this % of slots active |
 

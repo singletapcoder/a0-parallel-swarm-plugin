@@ -14,6 +14,7 @@ auto_classify: true
 
 # Model overrides by complexity tier (leave empty to use agent's default model)
 # simple_model: ""
+# moderate_model: ""
 # complex_model: ""
 
 # Backpressure threshold (0.0-1.0) — throttle when this % of slots are active
